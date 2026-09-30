@@ -2,7 +2,9 @@ name: Berita Saham ke Telegram
 
 on:
   schedule:
-    - cron: "*/15 * * * *"     # tiap 15 menit (GitHub kadang telat beberapa menit)
+    # tiap ±15 menit di menit "ganjil" (4, 19, 34, 49). Jadwal tepat di menit 0/15/30/45 adalah
+    # jam tersibuk GitHub, sehingga sering telat lama atau dilewati.
+    - cron: "4,19,34,49 * * * *"
   workflow_dispatch:            # tombol "Run workflow" untuk jalan manual
 
 permissions:
@@ -40,5 +42,7 @@ jobs:
             echo "Tidak ada berita baru untuk dicatat."
           else
             git commit -m "update terkirim.json"
-            git push
+            # ambil perubahan terbaru dulu (mis. bila file jadwal baru saja diedit) supaya push tidak ditolak
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push || { echo "::error::Gagal menyimpan terkirim.json (push ditolak). Jalankan ulang workflow."; exit 1; }
           fi
