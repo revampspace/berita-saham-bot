@@ -1,0 +1,31 @@
+name: Berita Saham ke Telegram
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"     # tiap 15 menit (GitHub kadang telat beberapa menit)
+  workflow_dispatch:            # tombol "Run workflow" untuk jalan manual
+
+permissions:
+  contents: write               # untuk menyimpan terkirim.json (daftar berita yang sudah dikirim)
+
+concurrency:
+  group: berita-saham
+  cancel-in-progress: false
+
+jobs:
+  kirim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ambil berita dan kirim ke Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 bot_berita_saham.py
+      - name: Simpan daftar berita yang sudah dikirim
+        run: |
+          git config user.name "bot-berita-saham"
+          git config user.email "bot@users.noreply.github.com"
+          git add terkirim.json
+          git diff --cached --quiet || git commit -m "update terkirim.json" && git push
