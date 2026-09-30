@@ -32,6 +32,12 @@ SAHAM = re.compile(r"\b(saham|emiten|tbk|ihsg|bursa|bei|idx|dividen|rights? issu
                    r"tender offer|private placement|suspensi|arb|ara|lq45|net (buy|sell)|investor asing|"
                    r"sekuritas|obligasi korporasi|laba bersih|kinerja keuangan)\b", re.I)
 TICKER = re.compile(r"(?<![A-Za-z0-9])([A-Z]{4})(?![A-Za-z0-9])")
+# penanda saham INDONESIA, dan penanda pasar luar negeri (dibuang kecuali juga menyebut pasar Indonesia)
+INDONESIA = re.compile(r"\b(ihsg|bei|bursa efek indonesia|tbk|emiten|idx|lq45|idx30|kompas100|ojk|ksei|"
+                       r"asing (borong|jual|lepas|buru|net)|investor asing|saham (bumn|bank|batu ?bara|lq45))\b", re.I)
+LUAR_NEGERI = re.compile(r"\b(wall street|nasdaq|dow jones|s&p ?500|nikkei|hang seng|kospi|shanghai|shenzhen|"
+                         r"ftse|dax|bursa (asia|eropa|as|amerika|global|jepang|china|korea)|saham (as|amerika|global|"
+                         r"teknologi as)|apple|nvidia|tesla|microsoft|amazon|alphabet|meta platforms|the fed)\b", re.I)
 BUKAN_TICKER = {"IHSG", "BUMN", "RUPS", "APBN", "APBD", "SAHAM", "KSEI", "LQ45", "MSCI", "FTSE", "WIB",
                 "UMKM", "LIVE", "INFO", "NEWS", "HARI", "BARU", "JADI", "BISA", "USAI", "YANG", "DARI",
                 "AKAN", "LAGI", "RUPIAH", "BURSA", "ASIA", "WALL", "STREET", "HMETD", "OJK", "BEI"}
@@ -67,6 +73,17 @@ def urai(xml_bytes):
     return out
 
 
+def emiten_di(teks):
+    return [t for t in dict.fromkeys(TICKER.findall(teks)) if t not in BUKAN_TICKER]
+
+
+def saham_indonesia(judul):
+    """Berita saham Indonesia: bertema saham DAN (menyebut penanda Indonesia/kode emiten ATAU tidak soal luar negeri)."""
+    if not SAHAM.search(judul):
+        return False
+    return bool(INDONESIA.search(judul) or emiten_di(judul)) or not LUAR_NEGERI.search(judul)
+
+
 def kunci(b):
     # judul yang sama dari media berbeda dianggap satu berita
     norm = re.sub(r"[^a-z0-9]+", " ", b["judul"].lower()).strip()
@@ -83,15 +100,28 @@ def kirim(token, chat_id, teks):
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
+            try:
+                info = json.loads(e.read())
+            except Exception:
+                info = {}
             if e.code == 429:                      # terlalu cepat: tunggu sesuai saran Telegram
-                time.sleep(int(json.loads(e.read()).get("parameters", {}).get("retry_after", 5)) + 1)
+                time.sleep(int(info.get("parameters", {}).get("retry_after", 5)) + 1)
                 continue
-            raise
+            alasan = info.get("description", str(e))
+            saran = {
+                401: "TELEGRAM_BOT_TOKEN salah. Salin ulang token dari @BotFather ke GitHub Secrets.",
+                400: "TELEGRAM_CHAT_ID salah (chat not found). Ambil ulang angka chat id dari getUpdates.",
+                403: "Bot tidak boleh mengirim ke chat ini. Buka bot di Telegram lalu tekan Start "
+                     "(atau Unblock), dan pastikan TELEGRAM_CHAT_ID adalah id ANDA dari getUpdates, "
+                     "bukan angka di depan token bot.",
+            }.get(e.code, "")
+            print(f"::error::Telegram menolak (HTTP {e.code}): {alasan}. {saran}")
+            raise SystemExit(1)
     raise RuntimeError("Gagal kirim ke Telegram setelah 3 percobaan")
 
 
 def format_pesan(b):
-    emiten = [t for t in dict.fromkeys(TICKER.findall(b["judul"])) if t not in BUKAN_TICKER]
+    emiten = emiten_di(b["judul"])
     jam = b["waktu"].astimezone(WIB).strftime("%d %b %H:%M WIB") if b["waktu"] else ""
     baris = [f"<b>{html.escape(b['judul'])}</b>",
              " · ".join(x for x in (html.escape(b["sumber"]), jam) if x)]
@@ -99,6 +129,26 @@ def format_pesan(b):
         baris.append("Emiten: " + ", ".join(emiten))
     baris.append(f'<a href="{html.escape(b["link"], quote=True)}">Baca berita</a>')
     return "\n".join(baris)
+
+
+# ---------------------------------------------------------------- data untuk Interstellar Ring 3D
+ARSIP_HARI, ARSIP_MAKS = 7, 1500
+
+
+def data_interstellar(lama, berita):
+    """Arsip 7 hari berita saham Indonesia dalam format yang dibaca Interstellar Ring 3D."""
+    posts = {p["id"]: p for p in (lama or {}).get("posts", [])}
+    for k, b in berita.items():
+        if k in posts or not b["waktu"]:
+            continue
+        posts[k] = {"id": k, "channel": "berita_saham", "time": b["waktu"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "account": b["sumber"], "title": b["judul"][:200], "url": b["link"],
+                    "entities": [{"type": "Emiten", "name": t} for t in emiten_di(b["judul"])], "responses": []}
+    kini = datetime.now(timezone.utc)
+    batas = (kini - timedelta(days=ARSIP_HARI)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    daftar = sorted((p for p in posts.values() if p["time"] >= batas), key=lambda p: p["time"])[-ARSIP_MAKS:]
+    return {"topic": "Berita Saham Indonesia", "start": batas, "end": kini.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "channels": [{"id": "berita_saham", "name": "Berita Saham", "color": "#2ee6a6"}], "posts": daftar}
 
 
 # ---------------------------------------------------------------- utama
@@ -125,7 +175,7 @@ def main():
         try:
             xmlb = sumber_data[i] if sumber_data is not None else ambil_rss(q)
             for b in urai(xmlb):
-                if SAHAM.search(b["judul"]):          # hanya berita tentang saham
+                if saham_indonesia(b["judul"]):       # hanya berita saham Indonesia
                     berita.setdefault(kunci(b), b)
         except Exception as e:
             gagal += 1
@@ -173,6 +223,7 @@ def main():
         status["pertama"] = False
 
     status["terkirim"] = status["terkirim"][-SIMPAN_MAKS:]
+    status["interstellar"] = data_interstellar(status.get("interstellar"), berita)
     status["terakhir_jalan"] = datetime.now(WIB).isoformat(timespec="seconds")
     if not a.kering:
         json.dump(status, open(BERKAS_STATUS, "w", encoding="utf-8"), ensure_ascii=False)
